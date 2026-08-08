@@ -62,9 +62,7 @@ export default function SelectionPage() {
       setTimeLeft((prev) => {
         if (prev <= 1) {
           clearInterval(timer);
-          setErrorMessage("Hold expired! Please re-select your seat.");
-          setStep('map');
-          setSelectedSeat(null);
+          handleCancel("Hold expired! Please re-select your seat.");
           return 0;
         }
         return prev - 1;
@@ -74,7 +72,29 @@ export default function SelectionPage() {
     return () => clearInterval(timer);
   }, [step]);
 
-  // 3. HOLD SEAT & SEND OTP
+  // 3. CANCEL & INSTANTLY RELEASE SEAT
+  const handleCancel = async (customErrorMsg?: string) => {
+    if (bookingRef) {
+      try {
+        // Explicitly tell PostgreSQL to release this seat immediately
+        await fetch('/api/release', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ booking_ref: bookingRef })
+        });
+      } catch (err) {
+        console.error("Failed to release seat on cancel", err);
+      }
+    }
+
+    setStep('map');
+    setSelectedSeat(null);
+    setBookingRef("");
+    setOtp("");
+    if (customErrorMsg) setErrorMessage(customErrorMsg);
+  };
+
+  // 4. HOLD SEAT & SEND OTP
   const handleHold = async (seatNum: string) => {
     if (!phone) {
       setErrorMessage("Please enter your phone number first.");
@@ -104,10 +124,10 @@ export default function SelectionPage() {
     }
   };
 
-  // 4. VERIFY OTP & PAY
+  // 5. VERIFY OTP & PAY
   const handlePayment = async () => {
     if (!otp) {
-      setErrorMessage("Please enter the OTP.");
+      setErrorMessage("Please enter the OTP (e.g. 1234).");
       return;
     }
     setErrorMessage("");
@@ -129,7 +149,7 @@ export default function SelectionPage() {
       if (res.ok) {
         setStep('processing');
       } else {
-        setErrorMessage(data.error || "Payment failed.");
+        setErrorMessage(data.error || "Payment failed. Please try again.");
       }
     } catch (err) {
       setErrorMessage("Network error processing payment.");
@@ -221,7 +241,7 @@ export default function SelectionPage() {
             value={otp} 
             onChange={e => setOtp(e.target.value)}
             className="w-full bg-black border border-zinc-700 p-4 rounded-lg text-2xl tracking-[0.5em] text-center font-mono outline-none focus:border-blue-500"
-            placeholder="0000"
+            placeholder="1234"
             maxLength={6}
           />
 
@@ -230,10 +250,10 @@ export default function SelectionPage() {
               {loading ? "Verifying..." : "Pay 500 BDT"}
             </Button>
             
-            {/* Cancel/Back button */}
+            {/* Instant Cancel Button */}
             <Button 
               variant="ghost" 
-              onClick={() => { setStep('map'); setSelectedSeat(null); }} 
+              onClick={() => handleCancel()} 
               className="w-full text-zinc-500 hover:text-white"
             >
               Cancel & Pick Different Seat
@@ -242,13 +262,13 @@ export default function SelectionPage() {
         </div>
       )}
 
-      {/* STEP 3: ASYNC PROCESSING (Waiting for Webhook Callback) */}
+      {/* STEP 3: ASYNC PROCESSING */}
       {step === 'processing' && (
         <div className="text-center py-16 space-y-4 bg-zinc-900/50 rounded-xl border border-zinc-800">
           <div className="w-12 h-12 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mx-auto" />
           <h2 className="text-xl font-bold">Processing Payment...</h2>
           <p className="text-sm text-zinc-400 max-w-xs mx-auto">
-            Awaiting confirmation from the payment gateway. Do not refresh this page.
+            Awaiting confirmation from payment gateway. Do not refresh this page.
           </p>
         </div>
       )}

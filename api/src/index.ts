@@ -2,8 +2,10 @@ import { Elysia } from "elysia";
 import postgres from "postgres";
 
 const PORT = process.env.PORT || 8080;
-const GATEWAY_URL = process.env.GATEWAY_URL || "http://localhost:9000";
-const HOLD_TTL_SECONDS = parseInt(process.env.HOLD_TTL_SECONDS || "3", 10); 
+// 1. Default to 'gateway:9000' for Docker container networking
+const GATEWAY_URL = process.env.GATEWAY_URL || "http://gateway:9000"; 
+// 2. Default to 60 seconds so manual testing gives enough time to type the OTP
+const HOLD_TTL_SECONDS = parseInt(process.env.HOLD_TTL_SECONDS || "60", 10); 
 const DB_URL = process.env.DB_URL || "postgres://cinema:cinema_password@db:5432/cinemadb";
 
 const sql = postgres(DB_URL, {
@@ -12,11 +14,16 @@ const sql = postgres(DB_URL, {
 
 const app = new Elysia();
 
-
+// ==========================================
+// 1. JUDGING HOOK (Healthcheck)
+// ==========================================
 app.get("/health", () => {
   return new Response("OK", { status: 200 });
 });
 
+// ==========================================
+// 2. MOVIES & SEATS
+// ==========================================
 app.get("/api/movies", async () => {
   try {
     const movies = await sql`SELECT * FROM movies`;
@@ -44,16 +51,16 @@ app.get("/api/shows/:show_id/seats", async ({ params }) => {
   }
 });
 
+// ==========================================
+// 3. HOLD SEAT & SEND OTP
+// ==========================================
 app.post("/api/hold", async ({ body }) => {
   const { show_id, seat_id, phone } = body as any;
   
-  // 1. Generate the ref FIRST so we can save it to the database
   const booking_ref = `bk_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
 
   try {
     const isSuccess = await sql.begin(async (tx) => {
-      
-      // Attempt to lock the seat. 
       const lockedSeats = await tx`
         SELECT id FROM seats 
         WHERE seat_number = ${seat_id} 
@@ -62,12 +69,10 @@ app.post("/api/hold", async ({ body }) => {
         FOR UPDATE SKIP LOCKED
       `;
 
-      // If length is 0, someone else got the lock first.
       if (lockedSeats.length === 0) {
         return false; 
       }
 
-      // We got the lock! Update the seat.
       await tx`
         UPDATE seats 
         SET status = 'HELD', 
@@ -80,7 +85,6 @@ app.post("/api/hold", async ({ body }) => {
       return true;
     });
 
-    // 3. Handle the scenario where they lost the "seat fight"
     if (!isSuccess) {
       return new Response(JSON.stringify({ error: "Seat is already held or booked" }), { 
         status: 409,
@@ -96,15 +100,17 @@ app.post("/api/hold", async ({ body }) => {
     });
   }
 
-  // 4. Call the Mock Gateway to send OTP
+  // Call Gateway to send OTP (Must succeed so gateway records the ref)
   try {
-    await fetch(`${GATEWAY_URL}/otp/send`, {
+    const otpSendRes = await fetch(`${GATEWAY_URL}/otp/send`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ phone, ref: booking_ref }),
     });
+
+    console.log(`📡 [GATEWAY /otp/send] Ref: ${booking_ref} | Status: ${otpSendRes.status}`);
   } catch (err) {
-    console.error("Gateway /otp/send failed", err);
+    console.error("📡 [GATEWAY ERROR] /otp/send unreachable:", err);
   }
 
   return new Response(JSON.stringify({ 
@@ -117,6 +123,9 @@ app.post("/api/hold", async ({ body }) => {
   });
 });
 
+// ==========================================
+// 4. VERIFY OTP & PAY
+// ==========================================
 app.post("/api/pay", async ({ body }) => {
   const { booking_ref, otp_code, amount, currency, callback_url } = body as any;
 
@@ -128,8 +137,11 @@ app.post("/api/pay", async ({ body }) => {
       body: JSON.stringify({ ref: booking_ref, code: otp_code }),
     });
 
+    const otpBody = await otpRes.text();
+    console.log(`📡 [GATEWAY /otp/verify] Ref: ${booking_ref} | Status: ${otpRes.status} | Response: ${otpBody}`);
+
     if (!otpRes.ok) {
-      return new Response(JSON.stringify({ error: "Invalid or expired OTP" }), { 
+      return new Response(JSON.stringify({ error: "Invalid or expired OTP. Please try again." }), { 
         status: 400, headers: { 'Content-Type': 'application/json' } 
       });
     }
@@ -140,20 +152,25 @@ app.post("/api/pay", async ({ body }) => {
     });
   }
 
-  // 2. Initiate Charge with Gateway
+  // 2. Fallback callback_url for internal container routing
+  const finalCallbackUrl = callback_url || "http://api:8080/api/callback";
+
+  // 3. Initiate Charge with Gateway
   let chargeData;
   try {
     const chargeRes = await fetch(`${GATEWAY_URL}/charge`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      // Note: In local testing, callback_url should be your machine's IP, 
-      // or "http://api:8080/api/callback" if testing entirely inside Docker network
-      body: JSON.stringify({ amount, currency, booking_ref, callback_url }),
+      body: JSON.stringify({ 
+        amount: amount || 500, 
+        currency: currency || "BDT", 
+        booking_ref, 
+        callback_url: finalCallbackUrl 
+      }),
     });
 
     if (!chargeRes.ok) {
-      // The gateway randomly returns 500s. We must handle this gracefully.
-      return new Response(JSON.stringify({ error: "Payment gateway failed to initialize. Please retry." }), { 
+      return new Response(JSON.stringify({ error: "Payment gateway busy. Please retry." }), { 
         status: 502, headers: { 'Content-Type': 'application/json' } 
       });
     }
@@ -166,14 +183,14 @@ app.post("/api/pay", async ({ body }) => {
     });
   }
 
-  // 3. Save the Payment Intent to the Database
+  // 4. Record Payment Intent
   try {
     await sql`
       INSERT INTO payments (booking_ref, payment_id, amount, currency, status)
       VALUES (
         ${booking_ref}, 
         ${chargeData.payment_id}, 
-        ${amount}, 
+        ${amount || 500}, 
         ${currency || 'BDT'}, 
         ${chargeData.status}
       )
@@ -189,29 +206,50 @@ app.post("/api/pay", async ({ body }) => {
     });
   }
 
-  // 4. Return success to the user immediately. 
-  // We do NOT wait for the callback here!
   return new Response(JSON.stringify({
     message: "Payment processing initiated. Waiting for confirmation.",
     payment_id: chargeData.payment_id,
-    status: chargeData.status // This will usually be "PENDING"
+    status: chargeData.status
   }), { 
-    status: 202, // 202 Accepted is the correct HTTP status for async processing
+    status: 202,
     headers: { 'Content-Type': 'application/json' } 
   });
 });
 
 // ==========================================
-// 5. GATEWAY CALLBACK (Webhook)
+// 5. CANCEL / RELEASE HOLD
+// ==========================================
+app.post("/api/release", async ({ body }) => {
+  const { booking_ref } = body as any;
+
+  if (booking_ref) {
+    try {
+      await sql`
+        UPDATE seats 
+        SET status = 'AVAILABLE', 
+            hold_expires_at = NULL, 
+            booking_ref = NULL 
+        WHERE booking_ref = ${booking_ref} AND status = 'HELD'
+      `;
+      console.log(`🔓 [CANCEL] Instantly released seat for booking ref: ${booking_ref}`);
+    } catch (err) {
+      console.error("Error releasing seat:", err);
+    }
+  }
+
+  return new Response(JSON.stringify({ message: "Seat hold released" }), { status: 200 });
+});
+
+// ==========================================
+// 6. GATEWAY CALLBACK (Webhook)
 // ==========================================
 app.post("/api/callback", async ({ body }) => {
   const payload = body as any;
-  const { event_id, payment_id, booking_ref, status, amount } = payload;
+  const { event_id, payment_id, booking_ref, status } = payload;
 
-  console.log(`📩 [CALLBACK RECEIVED] Event: ${event_id} | Ref: ${booking_ref} | Status: ${status}`);
+  console.log(`📩 [CALLBACK] Event: ${event_id} | Ref: ${booking_ref} | Status: ${status}`);
 
   if (!event_id || !booking_ref) {
-    console.warn("Received malformed callback payload:", payload);
     return new Response("Malformed payload ignored", { status: 200 });
   }
 
@@ -222,7 +260,6 @@ app.post("/api/callback", async ({ body }) => {
         VALUES (${event_id})
       `;
 
-      // UPDATE PAYMENT RECORD
       await tx`
         UPDATE payments 
         SET status = ${status}, 
@@ -230,7 +267,6 @@ app.post("/api/callback", async ({ body }) => {
         WHERE booking_ref = ${booking_ref}
       `;
 
-      // UPDATE SEAT STATUS BASED ON OUTCOME
       if (status === "SUCCEEDED") {
         await tx`
           UPDATE seats 
@@ -238,7 +274,7 @@ app.post("/api/callback", async ({ body }) => {
               hold_expires_at = NULL 
           WHERE booking_ref = ${booking_ref}
         `;
-        console.log(`✅ [BOOKING CONFIRMED] Seat permanently booked for ${booking_ref}`);
+        console.log(`✅ [BOOKED] Seat permanently booked for ${booking_ref}`);
 
       } else if (status === "FAILED" || status === "REFUNDED") {
         await tx`
@@ -248,23 +284,25 @@ app.post("/api/callback", async ({ body }) => {
               booking_ref = NULL 
           WHERE booking_ref = ${booking_ref}
         `;
-        console.log(`❌ [PAYMENT FAILED] Released seat back to pool for ${booking_ref}`);
+        console.log(`❌ [RELEASED] Released seat back to pool for ${booking_ref}`);
       }
     });
 
   } catch (err: any) {
     if (err.code === "23505") {
-      console.log(`⚠️ [DUPLICATE CALLBACK IGNORED] Event ${event_id} already processed. Returning 200.`);
+      console.log(`⚠️ [DUPLICATE CALLBACK] Event ${event_id} already processed. Returning 200.`);
       return new Response("Duplicate callback ignored", { status: 200 });
     }
     console.error("Error processing callback DB transaction:", err);
     return new Response("Callback error handled", { status: 200 });
   }
 
-  // Always return 200 OK
   return new Response("Callback processed successfully", { status: 200 });
 });
 
+// ==========================================
+// 7. BACKGROUND HOLD CLEANUP WORKER
+// ==========================================
 setInterval(async () => {
   try {
     const releasedSeats = await sql`
@@ -285,7 +323,6 @@ setInterval(async () => {
     console.error("Error in background hold cleanup worker:", error);
   }
 }, 2000);
-
 
 // --- Start Server ---
 app.listen(PORT, () => {
