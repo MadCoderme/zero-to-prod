@@ -14,6 +14,6 @@ RUN npm run build || mkdir -p dist && cp -r public/* dist/ 2>/dev/null || true
 FROM nginx:alpine
 COPY --from=builder /app/dist /usr/share/nginx/html
 # Include default nginx fallback for single page applications (SPA)
-RUN echo 'server { listen 8000; location / { root /usr/share/nginx/html; index index.html; try_files $uri $uri/ /index.html; } }' > /etc/nginx/conf.d/default.conf
+RUN echo 'server { listen 80; location / { root /usr/share/nginx/html; index index.html; try_files $uri $uri/ /index.html; } }' > /etc/nginx/conf.d/default.conf
 
-EXPOSE 8000
+EXPOSE 80
