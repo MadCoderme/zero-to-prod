@@ -1,0 +1,42 @@
+version: '3.8'
+
+services:
+  # 1. The Provided Mock Gateway (Exactly as required)
+  gateway:
+    image: asifmahmoud414/mock-gateway:latest
+    ports: 
+      - "9000:9000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # 2. Your Database (Recommended: PostgreSQL for handling concurrent locks)
+  db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: cinema
+      POSTGRES_PASSWORD: cinema_password
+      POSTGRES_DB: cinemadb
+    ports:
+      - "5432:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+
+  # 3. Your Backend Application (Placeholder - uncomment when you write code)
+  # api:
+  #   build: ./backend
+  #   ports:
+  #     - "8080:8080"
+  #   environment:
+  #     - DB_URL=postgres://cinema:cinema_password@db:5432/cinemadb
+  #     - GATEWAY_URL=http://gateway:9000
+  #     - HOLD_TTL_SECONDS=60
+  #   depends_on:
+  #     - db
+  #     - gateway
+
+volumes:
+  db_data:
