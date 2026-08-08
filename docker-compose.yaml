@@ -18,11 +18,13 @@ services:
     build:
       context: ./api
       dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
     environment:
       - PORT=8080
       - DB_URL=postgres://cinema:cinema_password@db:5432/cinemadb
       - GATEWAY_URL=http://gateway:9000
-      - HOLD_TTL_SECONDS=${HOLD_TTL_SECONDS:-60} # Reads from env, defaults to 60s
+      - HOLD_TTL_SECONDS=${HOLD_TTL_SECONDS:-60}
     depends_on:
       db:
         condition: service_healthy
