@@ -6,16 +6,34 @@ node_modules/
 .bun/
 .bun-cache/
 
+# Next.js / frontend build output
+.next/
+**/.next/
+out/
+**/out/
+.next-cache/
+**/.next-cache/
+.vercel/
+**/.vercel/
+
+# production/static output
+/dist/
+/build/
+/coverage/
+**/coverage/
+*.tsbuildinfo
+
 # environment files
 .env
 .env.*
 !.env.example
+!.env.local.example
 
-# build output
-/dist/
-/build/
-/coverage/
-*.tsbuildinfo
+# local/frontend tool caches
+.DS_Store
+*.pem
+*.key
+*.crt
 
 # logs
 *.log
@@ -25,7 +43,7 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
-# editor / OS files
+# generated editor / OS files
 .vscode/
 .idea/
 .DS_Store
