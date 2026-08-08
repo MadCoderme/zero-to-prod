@@ -1,6 +1,6 @@
 # cinemaseat-frontend/Dockerfile
 
-# Stage 1: Build the frontend static assets
+# Stage 1: Build the Next.js app
 FROM node:18-alpine AS builder
 WORKDIR /app
 
@@ -8,12 +8,19 @@ COPY package*.json ./
 RUN npm install
 
 COPY . .
-RUN npm run build || mkdir -p dist && cp -r public/* dist/ 2>/dev/null || true
+RUN npm run build
 
-# Stage 2: Serve using lightweight Nginx
-FROM nginx:alpine
-COPY --from=builder /app/dist /usr/share/nginx/html
-# Include default nginx fallback for single page applications (SPA)
-RUN echo 'server { listen 80; location / { root /usr/share/nginx/html; index index.html; try_files $uri $uri/ /index.html; } }' > /etc/nginx/conf.d/default.conf
+# Stage 2: Run the production Next.js server
+FROM node:18-alpine AS runner
+WORKDIR /app
 
-EXPOSE 80
+ENV NODE_ENV=production
+
+COPY --from=builder /app/package*.json ./
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/.next ./.next
+COPY --from=builder /app/public ./public
+
+EXPOSE 3000
+
+CMD ["npx", "next", "start", "-H", "0.0.0.0", "-p", "3000"]
