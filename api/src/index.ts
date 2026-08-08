@@ -3,7 +3,7 @@ import postgres from "postgres";
 
 const PORT = process.env.PORT || 8080;
 const GATEWAY_URL = process.env.GATEWAY_URL || "http://localhost:9000";
-const HOLD_TTL_SECONDS = parseInt(process.env.HOLD_TTL_SECONDS || "60", 10); 
+const HOLD_TTL_SECONDS = parseInt(process.env.HOLD_TTL_SECONDS || "3", 10); 
 const DB_URL = process.env.DB_URL || "postgres://cinema:cinema_password@localhost:5432/cinemadb";
 
 const sql = postgres(DB_URL, {
@@ -201,35 +201,90 @@ app.post("/api/pay", async ({ body }) => {
   });
 });
 
+// ==========================================
+// 5. GATEWAY CALLBACK (Webhook)
+// ==========================================
 app.post("/api/callback", async ({ body }) => {
   const payload = body as any;
-  /*
-    Expected payload:
-    { "event_id": "evt_001", "payment_id": "pay_xyz", "booking_ref": "bk_001", "status": "SUCCEEDED", "amount": 450 }
-  */
-  
-  console.log("Received callback:", payload);
+  const { event_id, payment_id, booking_ref, status, amount } = payload;
 
-  // TODO: 1. Attempt to insert payload.event_id into `processed_webhooks` table
-  // TODO: 2. If Postgres throws Unique Constraint Violation -> Duplicate! Return 200 immediately.
+  console.log(`📩 [CALLBACK RECEIVED] Event: ${event_id} | Ref: ${booking_ref} | Status: ${status}`);
 
-  // TODO: 3. If status === "SUCCEEDED" -> Update seat status to 'BOOKED'
-  // TODO: 4. If status === "FAILED" -> Update seat status to 'AVAILABLE' (or wait for expiry)
+  if (!event_id || !booking_ref) {
+    console.warn("Received malformed callback payload:", payload);
+    return new Response("Malformed payload ignored", { status: 200 });
+  }
 
-  // CRITICAL: Always return 200 OK so the gateway stops retrying.
-  return new Response("Callback processed", { status: 200 });
+  try {
+    await sql.begin(async (tx) => {
+      await tx`
+        INSERT INTO processed_webhooks (event_id) 
+        VALUES (${event_id})
+      `;
+
+      // UPDATE PAYMENT RECORD
+      await tx`
+        UPDATE payments 
+        SET status = ${status}, 
+            payment_id = COALESCE(${payment_id}, payment_id)
+        WHERE booking_ref = ${booking_ref}
+      `;
+
+      // UPDATE SEAT STATUS BASED ON OUTCOME
+      if (status === "SUCCEEDED") {
+        await tx`
+          UPDATE seats 
+          SET status = 'BOOKED', 
+              hold_expires_at = NULL 
+          WHERE booking_ref = ${booking_ref}
+        `;
+        console.log(`✅ [BOOKING CONFIRMED] Seat permanently booked for ${booking_ref}`);
+
+      } else if (status === "FAILED" || status === "REFUNDED") {
+        await tx`
+          UPDATE seats 
+          SET status = 'AVAILABLE', 
+              hold_expires_at = NULL, 
+              booking_ref = NULL 
+          WHERE booking_ref = ${booking_ref}
+        `;
+        console.log(`❌ [PAYMENT FAILED] Released seat back to pool for ${booking_ref}`);
+      }
+    });
+
+  } catch (err: any) {
+    if (err.code === "23505") {
+      console.log(`⚠️ [DUPLICATE CALLBACK IGNORED] Event ${event_id} already processed. Returning 200.`);
+      return new Response("Duplicate callback ignored", { status: 200 });
+    }
+    console.error("Error processing callback DB transaction:", err);
+    return new Response("Callback error handled", { status: 200 });
+  }
+
+  // Always return 200 OK
+  return new Response("Callback processed successfully", { status: 200 });
 });
 
-
 setInterval(async () => {
-  // console.log("Running background job to clear expired holds...");
-  
-  // TODO: Execute SQL:
-  // UPDATE seats 
-  // SET status = 'AVAILABLE', hold_expires_at = NULL, booking_ref = NULL
-  // WHERE status = 'HELD' AND hold_expires_at < NOW()
+  try {
+    const releasedSeats = await sql`
+      UPDATE seats 
+      SET status = 'AVAILABLE', 
+          hold_expires_at = NULL, 
+          booking_ref = NULL
+      WHERE status = 'HELD' 
+        AND hold_expires_at <= NOW()
+      RETURNING seat_number, showtime_id;
+    `;
 
-}, 5000);
+    if (releasedSeats.length > 0) {
+      const seatsList = releasedSeats.map(s => s.seat_number).join(", ");
+      console.log(`⏱️ [AUTO-RELEASE] TTL Expired. Returned to available: ${seatsList}`);
+    }
+  } catch (error) {
+    console.error("Error in background hold cleanup worker:", error);
+  }
+}, 2000);
 
 
 // --- Start Server ---
