@@ -4,7 +4,7 @@ import postgres from "postgres";
 const PORT = process.env.PORT || 8080;
 const GATEWAY_URL = process.env.GATEWAY_URL || "http://localhost:9000";
 const HOLD_TTL_SECONDS = parseInt(process.env.HOLD_TTL_SECONDS || "3", 10); 
-const DB_URL = process.env.DB_URL || "postgres://cinema:cinema_password@localhost:5432/cinemadb";
+const DB_URL = process.env.DB_URL || "postgres://cinema:cinema_password@db:5432/cinemadb";
 
 const sql = postgres(DB_URL, {
   max: 20
