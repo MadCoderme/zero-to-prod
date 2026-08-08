@@ -1,18 +1,43 @@
 version: '3.8'
 
 services:
-  # 1. The Provided Mock Gateway (Exactly as required)
-  gateway:
-    image: asifmahmoud414/mock-gateway:latest
-    ports: 
-      - "9000:9000"
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
+  # 1. Reverse Proxy (Single Base URL Entry Point on Port 80)
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - api
+      - frontend
+    restart: always
 
-  # 2. Your Database (Recommended: PostgreSQL for handling concurrent locks)
+  # 2. Bun TypeScript API
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    environment:
+      - PORT=8080
+      - DB_URL=postgres://cinema:cinema_password@db:5432/cinemadb
+      - GATEWAY_URL=http://gateway:9000
+      - HOLD_TTL_SECONDS=${HOLD_TTL_SECONDS:-60} # Reads from env, defaults to 60s
+    depends_on:
+      db:
+        condition: service_healthy
+      gateway:
+        condition: service_started
+    restart: always
+
+  # 3. Frontend Web Application
+  frontend:
+    build:
+      context: ./cinemaseat-frontend
+      dockerfile: Dockerfile
+    restart: always
+
+  # 4. PostgreSQL Database
   db:
     image: postgres:15-alpine
     environment:
@@ -24,19 +49,18 @@ services:
     volumes:
       - db_data:/var/lib/postgresql/data
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cinema -d cinemadb"]
+      interval: 3s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
 
-  # 3. Your Backend Application (Placeholder - uncomment when you write code)
-  # api:
-  #   build: ./backend
-  #   ports:
-  #     - "8080:8080"
-  #   environment:
-  #     - DB_URL=postgres://cinema:cinema_password@db:5432/cinemadb
-  #     - GATEWAY_URL=http://gateway:9000
-  #     - HOLD_TTL_SECONDS=60
-  #   depends_on:
-  #     - db
-  #     - gateway
+  # 5. Provided Mock Payment & OTP Gateway
+  gateway:
+    image: asifmahmoud414/mock-gateway:latest
+    ports:
+      - "9000:9000"
 
 volumes:
   db_data:
